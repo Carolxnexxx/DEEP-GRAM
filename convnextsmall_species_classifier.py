@@ -1,13 +1,3 @@
-"""
-Species Classification - ConvNeXt-Small Transfer Learning
-
-Uses Excel lookup table to assign species labels based on slide names.
-Trains with transfer learning from ImageNet pretrained ConvNeXt-Small.
-
-ConvNeXt (2022) modernizes ConvNets with ideas from Vision Transformers -
-currently one of the best pure CNN architectures available.
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,34 +21,22 @@ print(f"Using device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-
-# ============================================================================
-# CONFIG
-# ============================================================================
-
 CONFIG = {
-    # Paths
+
     'labels_excel': r'C:\Users\carol\gram stain ai\species_training.xlsx',
     'crops_folder': r'C:\Gram Stain Training Data\detections',
     'model_dir': r'C:\Gram Stain Training Data\models',
     
-    # Training
     'image_size': (224, 224),
     'batch_size': 32,
-    'epochs_frozen': 10,       # Phase 1: train final layers only
-    'epochs_unfrozen': 20,     # Phase 2: fine-tune deep layers
+    'epochs_frozen': 10,
+    'epochs_unfrozen': 20,
     'lr_frozen': 1e-3,
     'lr_unfrozen': 1e-5,
     'patience': 10,
 }
 
-
-# ============================================================================
-# DATASET
-# ============================================================================
-
 class SpeciesDataset(Dataset):
-    """Dataset for species classification."""
     
     def __init__(self, image_paths, labels, label_map, image_size=(224, 224), augment=True):
         self.image_paths = image_paths
@@ -67,7 +45,6 @@ class SpeciesDataset(Dataset):
         self.image_size = image_size
         self.augment = augment
         
-        # ImageNet normalization for pretrained ConvNeXt
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
@@ -111,29 +88,19 @@ class SpeciesDataset(Dataset):
         
         return img, label
 
-
-# ============================================================================
-# MODEL
-# ============================================================================
-
 class SpeciesConvNeXtSmall(nn.Module):
-    """ConvNeXt-Small for species classification."""
     
     def __init__(self, num_classes, pretrained=True):
         super().__init__()
         
-        # Load pretrained ConvNeXt-Small
         self.convnext = models.convnext_small(weights='IMAGENET1K_V1' if pretrained else None)
         
-        # ConvNeXt-Small classifier: 768 features -> 1000 classes
-        # Structure: classifier[0] = LayerNorm, classifier[1] = Flatten, classifier[2] = Linear
-        num_features = self.convnext.classifier[2].in_features  # 768
+        num_features = self.convnext.classifier[2].in_features
         
-        # Replace classifier (keep LayerNorm and Flatten)
         self.convnext.classifier[2] = nn.Sequential(
             nn.Dropout(0.4),
             nn.Linear(num_features, 512),
-            nn.GELU(),  # ConvNeXt uses GELU activation
+            nn.GELU(),
             nn.Dropout(0.3),
             nn.Linear(512, 256),
             nn.GELU(),
@@ -145,7 +112,6 @@ class SpeciesConvNeXtSmall(nn.Module):
         return self.convnext(x)
     
     def freeze_backbone(self):
-        """Freeze all feature layers, train only classifier."""
         for param in self.convnext.features.parameters():
             param.requires_grad = False
         for param in self.convnext.classifier.parameters():
@@ -153,16 +119,9 @@ class SpeciesConvNeXtSmall(nn.Module):
         print("Backbone frozen. Training only classifier.")
     
     def unfreeze_deep_layers(self, num_stages=2):
-        """
-        Unfreeze last few stages for fine-tuning.
-        ConvNeXt-Small has 4 stages (0-3) with increasing channels.
-        Stage 0: 96 channels, Stage 1: 192, Stage 2: 384, Stage 3: 768
-        """
-        # ConvNeXt features structure: 8 modules
-        # [0] stem, [1] stage1, [2] downsample, [3] stage2, [4] downsample, [5] stage3, [6] downsample, [7] stage4
+
         total_modules = len(self.convnext.features)
         
-        # Unfreeze last num_stages * 2 modules (stage + downsample pairs)
         start_idx = max(0, total_modules - num_stages * 2)
         for i in range(start_idx, total_modules):
             for param in self.convnext.features[i].parameters():
@@ -175,18 +134,11 @@ class SpeciesConvNeXtSmall(nn.Module):
             param.requires_grad = True
         print("All layers unfrozen.")
 
-
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
 def load_data(config):
-    """Load data using Excel lookup table."""
     
     df = pd.read_excel(config['labels_excel'])
     print(f"Loaded lookup table with {len(df)} entries")
     
-    # Create lookup: slide_name -> species
     lookup = {}
     for _, row in df.iterrows():
         name = str(row['Name']).strip()
@@ -194,7 +146,6 @@ def load_data(config):
     
     print(f"Slides in lookup: {len(lookup)}")
     
-    # Find all crops
     crops_folder = config['crops_folder']
     all_images = []
     
@@ -239,7 +190,6 @@ def load_data(config):
     image_paths = [img['path'] for img in all_images]
     labels = [img['species'] for img in all_images]
     
-    # Create label map
     unique_labels = sorted(set(labels))
     label_map = {label: idx for idx, label in enumerate(unique_labels)}
     reverse_map = {idx: label for label, idx in label_map.items()}
@@ -257,13 +207,7 @@ def load_data(config):
         'num_classes': len(unique_labels)
     }
 
-
-# ============================================================================
-# TRAINER
-# ============================================================================
-
 class SpeciesConvNeXtSmallTrainer:
-    """Training pipeline for ConvNeXt-Small species classifier."""
     
     def __init__(self, config):
         self.config = config
@@ -276,16 +220,13 @@ class SpeciesConvNeXtSmallTrainer:
         self.reverse_map = self.data['reverse_map']
         self.num_classes = self.data['num_classes']
         
-        # Save label mapping
         mapping_path = os.path.join(config['model_dir'], 'species_convnextsmall_label_mapping.json')
         with open(mapping_path, 'w') as f:
             json.dump({'label_map': self.label_map, 'reverse_map': self.reverse_map}, f, indent=2)
         print(f"Saved label mapping to {mapping_path}")
     
     def train(self):
-        """Train with simple train/val split."""
         
-        # Split data
         train_paths, val_paths, train_labels, val_labels = train_test_split(
             self.data['image_paths'], self.data['labels'],
             test_size=0.2, stratify=self.data['labels'], random_state=42
@@ -294,7 +235,6 @@ class SpeciesConvNeXtSmallTrainer:
         print(f"\nTraining samples: {len(train_paths)}")
         print(f"Validation samples: {len(val_paths)}")
         
-        # Datasets
         train_dataset = SpeciesDataset(
             train_paths, train_labels, self.label_map,
             self.config['image_size'], augment=True
@@ -309,10 +249,8 @@ class SpeciesConvNeXtSmallTrainer:
         val_loader = DataLoader(val_dataset, batch_size=self.config['batch_size'],
                                 shuffle=False, num_workers=0, pin_memory=True)
         
-        # Model
         model = SpeciesConvNeXtSmall(self.num_classes, pretrained=True).to(device)
         
-        # Class weights for imbalanced data
         class_counts = Counter(train_labels)
         total = len(train_labels)
         weights = torch.tensor([
@@ -325,9 +263,6 @@ class SpeciesConvNeXtSmallTrainer:
         best_acc = 0
         best_model_path = None
         
-        # =====================================================================
-        # PHASE 1: Frozen backbone
-        # =====================================================================
         print(f"\n--- Phase 1: Training classifier (frozen backbone) ---")
         model.freeze_backbone()
         
@@ -351,11 +286,8 @@ class SpeciesConvNeXtSmallTrainer:
                 best_model_path = os.path.join(self.config['model_dir'], 
                                                f'species_convnextsmall_best_{timestamp}.pth')
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
         
-        # =====================================================================
-        # PHASE 2: Fine-tune deep layers
-        # =====================================================================
         print(f"\n--- Phase 2: Fine-tuning ConvNeXt stages ---")
         model.unfreeze_deep_layers(num_stages=2)
         
@@ -383,7 +315,7 @@ class SpeciesConvNeXtSmallTrainer:
                 best_model_path = os.path.join(self.config['model_dir'],
                                                f'species_convnextsmall_best_{timestamp}.pth')
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
             else:
                 patience_counter += 1
                 if patience_counter >= self.config['patience']:
@@ -393,7 +325,6 @@ class SpeciesConvNeXtSmallTrainer:
         print(f"\nTraining complete! Best accuracy: {best_acc:.1f}%")
         print(f"Model saved to: {best_model_path}")
         
-        # Final evaluation
         self._final_evaluation(model, val_loader, val_labels)
         
         return self.history
@@ -454,7 +385,6 @@ class SpeciesConvNeXtSmallTrainer:
         }, path)
     
     def _final_evaluation(self, model, loader, true_labels):
-        """Print classification report and confusion matrix."""
         model.eval()
         all_preds = []
         
@@ -465,14 +395,12 @@ class SpeciesConvNeXtSmallTrainer:
                 _, predicted = outputs.max(1)
                 all_preds.extend(predicted.cpu().numpy())
         
-        # Convert to label indices
         true_indices = [self.label_map[l] for l in true_labels]
         
         print("\nClassification Report:")
         target_names = [self.reverse_map[i] for i in range(self.num_classes)]
         print(classification_report(true_indices, all_preds, target_names=target_names))
         
-        # Confusion matrix
         cm = confusion_matrix(true_indices, all_preds)
         plt.figure(figsize=(12, 10))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
@@ -489,7 +417,6 @@ class SpeciesConvNeXtSmallTrainer:
         plt.close()
     
     def plot_history(self):
-        """Plot and save training history."""
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         
         axes[0].plot(self.history['train_loss'], label='Train')
@@ -513,13 +440,7 @@ class SpeciesConvNeXtSmallTrainer:
         print(f"Saved training history to {save_path}")
         plt.close()
 
-
-# ============================================================================
-# PREDICTOR
-# ============================================================================
-
 class SpeciesConvNeXtSmallClassifier:
-    """Use trained ConvNeXt-Small model for species prediction."""
     
     def __init__(self, model_path, image_size=(224, 224)):
         self.image_size = image_size
@@ -590,38 +511,3 @@ class SpeciesConvNeXtSmallClassifier:
         print(df['species'].value_counts())
         
         return df
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("SPECIES CLASSIFIER - ConvNeXt-Small")
-    print("=" * 60)
-    
-    print("""
-USAGE:
-
-1. TRAIN:
-   
-   from species_convnextsmall_classifier import SpeciesConvNeXtSmallTrainer, CONFIG
-   
-   trainer = SpeciesConvNeXtSmallTrainer(CONFIG)
-   trainer.train()
-   trainer.plot_history()
-
-2. PREDICT:
-   
-   from species_convnextsmall_classifier import SpeciesConvNeXtSmallClassifier
-   
-   classifier = SpeciesConvNeXtSmallClassifier('models/species_convnextsmall_best_XXXXXX.pth')
-   species, confidence = classifier.predict('bacteria.png')
-   print(f"{species}: {confidence:.1%}")
-""")
-    
-    if os.path.exists(CONFIG['labels_excel']) and os.path.exists(CONFIG['crops_folder']):
-        print("\nData found! Ready to train.")
-    else:
-        print("\nUpdate CONFIG paths before training.")
