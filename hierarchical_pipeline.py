@@ -803,10 +803,3 @@ def generate_confusion_matrices(df_slides, df_all_crops, output_dir, timestamp=N
     print("\n" + "=" * 60)
     print("CONFUSION MATRICES COMPLETE")
     print("=" * 60)
-
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("HIERARCHICAL CLASSIFICATION PIPELINE")
-    print("Each crop independently routed: Gram → Morphology → Species")
-    print("=" * 60)
