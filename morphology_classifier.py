@@ -1,13 +1,3 @@
-"""
-Morphology Classification - Vision Transformer (ViT)
-
-3-class classification: Bacilli, Cocci Clusters, Cocci Chains
-Uses pretrained ViT-Small from timm with transfer learning.
-Supports slide-level train/val split with selectable validation slides.
-
-Expected accuracy: 85-92%
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -25,7 +15,6 @@ from tqdm import tqdm
 from collections import Counter
 import json
 
-# Install timm if needed
 try:
     import timm
 except ImportError:
@@ -39,19 +28,12 @@ print(f"Using device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-
-# ============================================================================
-# CONFIG
-# ============================================================================
-
 CONFIG = {
-    # Paths
+
     'labels_excel': r'C:\Users\carol\gram stain ai\species_training.xlsx',
     'crops_folder': r'C:\Gram Stain Training Data\detections',
     'model_dir': r'C:\Gram Stain Training Data\models',
     
-    # Species filter - set to None to use all species, or list specific ones
-    # Example: ['Staphylococcus aureus', 'Escherichia coli', 'Streptococcus pyogenes']
     'species_filter': ['Klebsiella pneumoniae',
                         'Enterobacter cloacae',
                         'Acinetobacter baumannii',
@@ -59,8 +41,6 @@ CONFIG = {
                         'Moraxella catarrhalis',
                         'Haemophilus influenzae'],
     
-    # Validation slides - one per species for good coverage
-    # Set to None for automatic 1-slide-per-species selection
     'val_slides': [
         'KP2',
         'ECL7',
@@ -70,17 +50,15 @@ CONFIG = {
         'HI5',
     ],
     
-    # Training settings
-    'image_size': (224, 224),  # ViT default
+    'image_size': (224, 224),
     'batch_size': 32,
-    'epochs_frozen': 5,        # Phase 1: train classifier only
-    'epochs_unfrozen': 15,     # Phase 2: fine-tune
+    'epochs_frozen': 5,
+    'epochs_unfrozen': 15,
     'lr_frozen': 1e-3,
     'lr_unfrozen': 1e-5,
     'patience': 10,
 }
 
-# Mapping from detailed groupings to 3 simplified categories
 GROUPING_MAP = {
     'Bacilli': 'bacilli',
     'Bacilli (Enterobacterales)': 'bacilli',
@@ -91,13 +69,7 @@ GROUPING_MAP = {
     'Cocci Chains (Enterococci)': 'cocci_chains',
 }
 
-
-# ============================================================================
-# DATASET
-# ============================================================================
-
 class MorphologyDataset(Dataset):
-    """Dataset for morphology classification."""
     
     def __init__(self, image_paths, labels, label_map, image_size=(224, 224), augment=True):
         self.image_paths = image_paths
@@ -106,7 +78,6 @@ class MorphologyDataset(Dataset):
         self.image_size = image_size
         self.augment = augment
         
-        # ImageNet normalization
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
@@ -150,28 +121,19 @@ class MorphologyDataset(Dataset):
         
         return img, label
 
-
-# ============================================================================
-# MODEL
-# ============================================================================
-
 class MorphologyViT(nn.Module):
-    """Vision Transformer for morphology classification."""
     
     def __init__(self, num_classes=3, pretrained=True):
         super().__init__()
         
-        # Load pretrained ViT-Small (patch size 16, image size 224)
         self.vit = timm.create_model(
             'vit_small_patch16_224',
             pretrained=pretrained,
-            num_classes=0  # Remove classifier head
+            num_classes=0
         )
         
-        # Get feature dimension
-        self.num_features = self.vit.embed_dim  # 384 for ViT-Small
+        self.num_features = self.vit.embed_dim
         
-        # Custom classifier head
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.num_features),
             nn.Dropout(0.3),
@@ -186,11 +148,9 @@ class MorphologyViT(nn.Module):
         return self.classifier(features)
     
     def get_features(self, x):
-        """Extract features before classifier."""
         return self.vit(x)
     
     def freeze_backbone(self):
-        """Freeze ViT, train only classifier."""
         for param in self.vit.parameters():
             param.requires_grad = False
         for param in self.classifier.parameters():
@@ -198,7 +158,6 @@ class MorphologyViT(nn.Module):
         print("ViT backbone frozen. Training only classifier.")
     
     def unfreeze_last_n_blocks(self, n=4):
-        """Unfreeze last N transformer blocks."""
         for param in self.vit.parameters():
             param.requires_grad = False
         
@@ -213,25 +172,17 @@ class MorphologyViT(nn.Module):
         
         print(f"Unfroze last {n} transformer blocks + classifier.")
 
-
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
 def load_data(config):
-    """Load data with slide-level split and optional species filter."""
     
     df = pd.read_excel(config['labels_excel'])
     print(f"Loaded lookup table with {len(df)} entries")
     
-    # Get species filter
     species_filter = config.get('species_filter', None)
     if species_filter:
         print(f"\nFiltering for {len(species_filter)} species:")
         for sp in species_filter:
             print(f"  - {sp}")
     
-    # Create lookup: slide_name -> morphology label (with species filter)
     lookup = {}
     slide_to_species = {}
     for _, row in df.iterrows():
@@ -239,22 +190,19 @@ def load_data(config):
         species = row['Species'].strip()
         original_grouping = row['Grouping'].strip()
         
-        # Skip if species filter is set and this species is not in it
         if species_filter and species not in species_filter:
             continue
         
-        # Map to simplified category
         if original_grouping in GROUPING_MAP:
             lookup[name] = GROUPING_MAP[original_grouping]
         else:
             print(f"  Warning: Unknown grouping '{original_grouping}' for {name}")
-            lookup[name] = 'bacilli'  # Default fallback
+            lookup[name] = 'bacilli'
         
         slide_to_species[name] = species
     
     print(f"Slides in lookup (after filter): {len(lookup)}")
     
-    # Find all crops organized by slide
     crops_folder = config['crops_folder']
     slides_data = {}
     
@@ -295,11 +243,10 @@ def load_data(config):
     if len(slides_data) == 0:
         raise ValueError("No slides found!")
     
-    # Split by specified validation slides or auto-select
     config_val_slides = config.get('val_slides', None)
     
     if config_val_slides:
-        # Use specified validation slides
+
         val_slides = [s for s in config_val_slides if s in slides_data]
         train_slides = [s for s in slides_data.keys() if s not in val_slides]
         
@@ -312,7 +259,7 @@ def load_data(config):
             missing = set(config_val_slides) - set(val_slides)
             print(f"  WARNING: Missing slides: {missing}")
     else:
-        # Auto-select: 1 slide per species
+
         species_slides = {}
         for _, row in df.iterrows():
             name = str(row['Name']).strip()
@@ -337,7 +284,6 @@ def load_data(config):
                 train_slides.extend(slides)
                 print(f"  {species}: train only (1 slide)")
     
-    # Build image lists
     train_paths = []
     train_labels = []
     val_paths = []
@@ -356,11 +302,9 @@ def load_data(config):
     print(f"\nTotal training images: {len(train_paths)}")
     print(f"Total validation images: {len(val_paths)}")
     
-    # Label map
     label_map = {'bacilli': 0, 'cocci_clusters': 1, 'cocci_chains': 2}
     reverse_map = {0: 'bacilli', 1: 'cocci_clusters', 2: 'cocci_chains'}
     
-    # Class distribution
     train_counts = Counter(train_labels)
     val_counts = Counter(val_labels)
     print(f"\nTraining distribution:")
@@ -382,13 +326,7 @@ def load_data(config):
         'val_slides': val_slides
     }
 
-
-# ============================================================================
-# TRAINER
-# ============================================================================
-
 class MorphologyViTTrainer:
-    """Training pipeline for ViT morphology classifier."""
     
     def __init__(self, config):
         self.config = config
@@ -401,7 +339,6 @@ class MorphologyViTTrainer:
         self.reverse_map = self.data['reverse_map']
         self.num_classes = self.data['num_classes']
         
-        # Save config
         mapping_path = os.path.join(config['model_dir'], 'morphology_vit_config_negative.json')
         with open(mapping_path, 'w') as f:
             json.dump({
@@ -412,7 +349,6 @@ class MorphologyViTTrainer:
         print(f"Saved config to {mapping_path}")
     
     def train(self):
-        """Train with two-phase transfer learning."""
         
         train_paths = self.data['train_paths']
         val_paths = self.data['val_paths']
@@ -422,7 +358,6 @@ class MorphologyViTTrainer:
         print(f"\nTraining samples: {len(train_paths)} ({len(self.data['train_slides'])} slides)")
         print(f"Validation samples: {len(val_paths)} ({len(self.data['val_slides'])} slides)")
         
-        # Datasets
         train_dataset = MorphologyDataset(
             train_paths, train_labels, self.label_map,
             self.config['image_size'], augment=True
@@ -437,10 +372,8 @@ class MorphologyViTTrainer:
         val_loader = DataLoader(val_dataset, batch_size=self.config['batch_size'],
                                 shuffle=False, num_workers=0, pin_memory=True)
         
-        # Model
         model = MorphologyViT(num_classes=self.num_classes, pretrained=True).to(device)
         
-        # Class weights - handle zero-sample classes
         train_counts = Counter(train_labels)
         total = len(train_labels)
         weights = []
@@ -449,7 +382,7 @@ class MorphologyViTTrainer:
             if count > 0:
                 weights.append(total / (self.num_classes * count))
             else:
-                weights.append(0.0)  # Zero weight for missing classes
+                weights.append(0.0)
         weights = torch.tensor(weights, dtype=torch.float).to(device)
         
         criterion = nn.CrossEntropyLoss(weight=weights)
@@ -457,9 +390,6 @@ class MorphologyViTTrainer:
         best_acc = 0
         best_model_path = None
         
-        # =====================================================================
-        # PHASE 1: Frozen backbone
-        # =====================================================================
         print(f"\n--- Phase 1: Training classifier (frozen ViT) ---")
         model.freeze_backbone()
         
@@ -488,11 +418,8 @@ class MorphologyViTTrainer:
                     f'morphology_vit_best_{timestamp}.pth'
                 )
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
         
-        # =====================================================================
-        # PHASE 2: Fine-tune
-        # =====================================================================
         print(f"\n--- Phase 2: Fine-tuning ViT ---")
         model.unfreeze_last_n_blocks(n=4)
         
@@ -525,7 +452,7 @@ class MorphologyViTTrainer:
                     f'morphology_vit_best_{timestamp}.pth'
                 )
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
             else:
                 patience_counter += 1
                 if patience_counter >= self.config['patience']:
@@ -535,14 +462,11 @@ class MorphologyViTTrainer:
         print(f"\nTraining complete! Best accuracy: {best_acc:.1f}%")
         print(f"Model saved to: {best_model_path}")
         
-        # Load best model for final evaluation
         checkpoint = torch.load(best_model_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Final evaluation
         self._final_evaluation(model, val_loader)
         
-        # Save plots
         self.plot_history()
         
         return self.history
@@ -604,7 +528,6 @@ class MorphologyViTTrainer:
         }, path)
     
     def _final_evaluation(self, model, loader):
-        """Print classification report and confusion matrix."""
         model.eval()
         all_preds = []
         all_labels = []
@@ -622,7 +545,6 @@ class MorphologyViTTrainer:
         print("\nClassification Report:")
         print(classification_report(all_labels, all_preds, target_names=target_names))
         
-        # Confusion matrix - percentages
         cm = confusion_matrix(all_labels, all_preds)
         cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
         
@@ -640,7 +562,6 @@ class MorphologyViTTrainer:
         plt.close()
     
     def plot_history(self):
-        """Plot and save training history."""
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         
         axes[0].plot(self.history['train_loss'], label='Train')
@@ -664,13 +585,7 @@ class MorphologyViTTrainer:
         print(f"Saved training history to {save_path}")
         plt.close()
 
-
-# ============================================================================
-# PREDICTOR
-# ============================================================================
-
 class MorphologyViTClassifier:
-    """Use trained ViT for morphology classification."""
     
     def __init__(self, model_path, image_size=(224, 224)):
         self.image_size = image_size
@@ -697,7 +612,6 @@ class MorphologyViTClassifier:
         print(f"Accuracy: {checkpoint['val_acc']:.1f}%")
     
     def predict(self, image_path):
-        """Predict morphology for a single image."""
         img = cv2.imread(image_path)
         if img is None:
             return None, 0.0
@@ -713,7 +627,6 @@ class MorphologyViTClassifier:
         return self.reverse_map[pred_class], confidence
     
     def predict_batch(self, image_paths, batch_size=32):
-        """Predict morphology for multiple images."""
         results = []
         
         for i in tqdm(range(0, len(image_paths), batch_size), desc="Predicting"):
@@ -745,48 +658,3 @@ class MorphologyViTClassifier:
                 })
         
         return pd.DataFrame(results)
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("MORPHOLOGY CLASSIFIER - Vision Transformer (Gram Negative)")
-    print("=" * 60)
-    
-    print("""
-USAGE:
-
-1. TRAIN:
-   
-   from morphology_vit_classifier_gn import MorphologyViTTrainer, CONFIG
-   
-   # Optionally filter species
-   CONFIG['species_filter'] = ['Staphylococcus aureus', 'Escherichia coli', ...]
-   
-   # Optionally modify validation slides
-   CONFIG['val_slides'] = ['SA1', 'EC2', 'EFS1', ...]
-   
-   trainer = MorphologyViTTrainer(CONFIG)
-   trainer.train()
-
-2. PREDICT:
-   
-   from morphology_vit_classifier_gn import MorphologyViTClassifier
-   
-   classifier = MorphologyViTClassifier('models/morphology_vit_best_XXXXXX.pth')
-   
-   # Single image
-   morphology, confidence = classifier.predict('bacteria.png')
-   print(f"{morphology}: {confidence:.1%}")
-   
-   # Batch
-   df = classifier.predict_batch(image_paths)
-""")
-    
-    if os.path.exists(CONFIG['labels_excel']) and os.path.exists(CONFIG['crops_folder']):
-        print("\nData found! Ready to train.")
-    else:
-        print("\nUpdate CONFIG paths before training.")
