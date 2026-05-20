@@ -1,16 +1,3 @@
-"""
-Gram-Negative Bacilli Species Classification - ConvNeXt-Small Transfer Learning
-
-Classifies 5 Gram-negative bacilli species (no Escherichia coli):
-- Klebsiella pneumoniae
-- Enterobacter cloacae
-- Stenotrophomonas maltophilia
-- Pseudomonas aeruginosa
-- Acinetobacter baumannii
-
-Uses slide-level train/test split with specified validation slides.
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -33,46 +20,30 @@ print(f"Using device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-
-# ============================================================================
-# CONFIG
-# ============================================================================
-
 CONFIG = {
-    # Paths
+
     'labels_excel': r'C:\Users\carol\gram stain ai\species_training.xlsx',
     'crops_folder': r'C:\Gram Stain Training Data\detections',
     'model_dir': r'C:\Gram Stain Training Data\models',
 
-    # 5 species — E. coli removed, Enterobacter cloacae and S. maltophilia added back
     'species_filter': [
         'Klebsiella pneumoniae',
         'Enterobacter cloacae',
         'Pseudomonas aeruginosa',
-        'Acinetobacter baumannii',
     ],
 
-    # 1 validation slide per species (EC6 removed with E. coli)
-    # Update these slide IDs to match your actual S. maltophilia validation slide
-    'val_slides': ['KP2', 'ECL7', 'PA3', 'AB2'],
+    'val_slides': ['KP2', 'ECL7', 'PA3'],
 
-    # Training
     'image_size': (224, 224),
     'batch_size': 32,
-    'epochs_frozen': 10,       # Phase 1: train final layers only
-    'epochs_unfrozen': 20,     # Phase 2: fine-tune deep layers
+    'epochs_frozen': 10,
+    'epochs_unfrozen': 20,
     'lr_frozen': 1e-3,
     'lr_unfrozen': 1e-5,
     'patience': 10,
 }
 
-
-# ============================================================================
-# DATASET
-# ============================================================================
-
 class SpeciesDataset(Dataset):
-    """Dataset for species classification."""
 
     def __init__(self, image_paths, labels, label_map, image_size=(224, 224), augment=True):
         self.image_paths = image_paths
@@ -124,20 +95,14 @@ class SpeciesDataset(Dataset):
 
         return img, label
 
-
-# ============================================================================
-# MODEL
-# ============================================================================
-
 class SpeciesConvNeXtSmall(nn.Module):
-    """ConvNeXt-Small for 5-species classification."""
 
     def __init__(self, num_classes, pretrained=True):
         super().__init__()
 
         self.convnext = models.convnext_small(weights='IMAGENET1K_V1' if pretrained else None)
 
-        num_features = self.convnext.classifier[2].in_features  # 768
+        num_features = self.convnext.classifier[2].in_features
 
         self.convnext.classifier[2] = nn.Sequential(
             nn.Dropout(0.4),
@@ -173,13 +138,7 @@ class SpeciesConvNeXtSmall(nn.Module):
             param.requires_grad = True
         print("All layers unfrozen.")
 
-
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
 def load_data(config):
-    """Load data using Excel lookup table with species filter."""
 
     df = pd.read_excel(config['labels_excel'])
     print(f"Loaded lookup table with {len(df)} entries")
@@ -328,13 +287,7 @@ def load_data(config):
         'val_slides': val_slides
     }
 
-
-# ============================================================================
-# TRAINER
-# ============================================================================
-
 class SpeciesConvNeXtSmallTrainer:
-    """Training pipeline for ConvNeXt-Small 5-species classifier (no E. coli)."""
 
     def __init__(self, config):
         self.config = config
@@ -389,9 +342,6 @@ class SpeciesConvNeXtSmallTrainer:
         best_acc = 0
         best_model_path = None
 
-        # =====================================================================
-        # PHASE 1: Frozen backbone
-        # =====================================================================
         print(f"\n--- Phase 1: Training classifier (frozen backbone) ---")
         model.freeze_backbone()
 
@@ -415,11 +365,8 @@ class SpeciesConvNeXtSmallTrainer:
                 best_model_path = os.path.join(self.config['model_dir'],
                                                f'gnb_5species_v2_best_{timestamp}.pth')
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
 
-        # =====================================================================
-        # PHASE 2: Fine-tune deep layers
-        # =====================================================================
         print(f"\n--- Phase 2: Fine-tuning ConvNeXt stages ---")
         model.unfreeze_deep_layers(num_stages=2)
 
@@ -447,7 +394,7 @@ class SpeciesConvNeXtSmallTrainer:
                 best_model_path = os.path.join(self.config['model_dir'],
                                                f'gnb_5species_v2_best_{timestamp}.pth')
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
             else:
                 patience_counter += 1
                 if patience_counter >= self.config['patience']:
@@ -575,13 +522,7 @@ class SpeciesConvNeXtSmallTrainer:
         print(f"Saved training history to {save_path}")
         plt.close()
 
-
-# ============================================================================
-# PREDICTOR
-# ============================================================================
-
 class SpeciesConvNeXtSmallClassifier:
-    """Use trained ConvNeXt-Small model for 5-species prediction (no E. coli)."""
 
     def __init__(self, model_path, image_size=(224, 224)):
         self.image_size = image_size
@@ -652,37 +593,3 @@ class SpeciesConvNeXtSmallClassifier:
         print(df['species'].value_counts())
 
         return df
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("SPECIES CLASSIFIER - ConvNeXt-Small (5 Species, no E. coli)")
-    print("=" * 60)
-
-    print("""
-USAGE:
-
-1. TRAIN:
-
-   from species_convnextsmall_5species_v2 import SpeciesConvNeXtSmallTrainer, CONFIG
-
-   trainer = SpeciesConvNeXtSmallTrainer(CONFIG)
-   trainer.train()
-
-2. PREDICT:
-
-   from species_convnextsmall_5species_v2 import SpeciesConvNeXtSmallClassifier
-
-   classifier = SpeciesConvNeXtSmallClassifier('models/gnb_5species_v2_best_XXXXXX.pth')
-   species, confidence = classifier.predict('bacteria.png')
-   print(f"{species}: {confidence:.1%}")
-""")
-
-    if os.path.exists(CONFIG['labels_excel']) and os.path.exists(CONFIG['crops_folder']):
-        print("\nData found! Ready to train.")
-    else:
-        print("\nUpdate CONFIG paths before training.")
