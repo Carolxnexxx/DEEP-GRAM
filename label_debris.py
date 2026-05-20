@@ -1,231 +1,217 @@
-"""
-Quick Labeling Tool for Bacteria vs Debris
-
-Shows random crop images. Press keys to label:
-  'b' = bacteria (keep)
-  'd' = debris/background (delete)
-  'u' = undo last
-  'q' = quit and save
-
-Labels are saved to a CSV file for training a debris filter.
-"""
-
-import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
 import cv2
-import random
+import os
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from datetime import datetime
+from tqdm import tqdm
 
-# ============================================================================
-# CONFIG
-# ============================================================================
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
 CONFIG = {
-    # Folder containing all crop subfolders
+    'labels_csv': r'C:\Gram Stain Training Data\debris_labels.csv',
     'crops_folder': r'C:\Gram Stain Training Data\detections',
-    
-    # Output CSV for labels
-    'output_csv': r'C:\Gram Stain Training Data\debris_labels.csv',
-    
-    # Number of images to label per session
-    'num_to_label': 1000,
-    
-    # Display size (crops will be scaled for easier viewing)
-    'display_size': 256,
-    
-    # Random seed for reproducibility
-    'random_seed': 42,
+    'model_dir': r'C:\Gram Stain Training Data\models',
+    'image_size': (64, 64),
+    'batch_size': 64,
+    'epochs': 30,
+    'learning_rate': 1e-3,
+    'bacteria_threshold': 0.7,
+    'dry_run': False,
 }
 
-
-# ============================================================================
-# LABELING TOOL
-# ============================================================================
-
-def get_all_crops(crops_folder):
-    """Get list of all crop image paths."""
-    print("Scanning for crops...")
+class DebrisDataset(Dataset):
+    def __init__(self, image_paths, labels, image_size=(64, 64), augment=True):
+        self.image_paths = image_paths
+        self.labels = labels
+        self.image_size = image_size
+        self.augment = augment
     
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        img = cv2.imread(self.image_paths[idx])
+        if img is None:
+            img = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.uint8)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, self.image_size)
+        if self.augment:
+            if np.random.rand() > 0.5:
+                img = np.fliplr(img).copy()
+            if np.random.rand() > 0.5:
+                img = np.flipud(img).copy()
+            if np.random.rand() > 0.5:
+                angle = np.random.randint(-180, 180)
+                h, w = img.shape[:2]
+                M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+                img = cv2.warpAffine(img, M, (w, h))
+        img = img.astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1)
+        label = torch.tensor(self.labels[idx], dtype=torch.long)
+        return img, label
+
+class DebrisCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2), nn.Dropout2d(0.25),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2), nn.Dropout2d(0.25),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(), nn.MaxPool2d(2), nn.Dropout2d(0.25),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(), nn.MaxPool2d(2), nn.Dropout2d(0.25),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256 * 4 * 4, 256), nn.ReLU(), nn.Dropout(0.5),
+            nn.Linear(256, 2)
+        )
+    
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+def train_debris_filter(config):
+    print("=" * 60)
+    print("TRAINING DEBRIS FILTER")
+    print("=" * 60)
+    df = pd.read_csv(config['labels_csv'])
+    print(f"Loaded {len(df)} labeled samples")
+    print(f"  Bacteria: {(df['label'] == 'bacteria').sum()}")
+    print(f"  Debris: {(df['label'] == 'debris').sum()}")
+    image_paths = df['path'].tolist()
+    labels = [0 if l == 'bacteria' else 1 for l in df['label']]
+    train_paths, val_paths, train_labels, val_labels = train_test_split(
+        image_paths, labels, test_size=0.2, stratify=labels, random_state=42)
+    print(f"\nTrain: {len(train_paths)}, Val: {len(val_paths)}")
+    train_dataset = DebrisDataset(train_paths, train_labels, config['image_size'], augment=True)
+    val_dataset = DebrisDataset(val_paths, val_labels, config['image_size'], augment=False)
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=0)
+    model = DebrisCNN().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    best_acc = 0
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for epoch in range(config['epochs']):
+        model.train()
+        train_loss = 0
+        train_correct = 0
+        train_total = 0
+        for images, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['epochs']}"):
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_total += labels.size(0)
+            train_correct += predicted.eq(labels).sum().item()
+        train_acc = 100. * train_correct / train_total
+        model.eval()
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                _, predicted = outputs.max(1)
+                val_total += labels.size(0)
+                val_correct += predicted.eq(labels).sum().item()
+        val_acc = 100. * val_correct / val_total
+        print(f"Epoch {epoch+1}: Train Acc={train_acc:.1f}%, Val Acc={val_acc:.1f}%")
+        if val_acc > best_acc:
+            best_acc = val_acc
+            model_path = os.path.join(config['model_dir'], f'debris_filter_{timestamp}.pth')
+            torch.save({'model_state_dict': model.state_dict(), 'val_acc': val_acc}, model_path)
+            print(f"  Saved best model ({val_acc:.1f}%)")
+    print(f"\nTraining complete! Best accuracy: {best_acc:.1f}%")
+    return model_path
+
+def filter_debris(config, model_path):
+    print("\n" + "=" * 60)
+    print("FILTERING DEBRIS")
+    print("=" * 60)
+    model = DebrisCNN().to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    print(f"Loaded model: {model_path}")
+    print(f"Model accuracy: {checkpoint['val_acc']:.1f}%")
+    crops_folder = config['crops_folder']
     all_crops = []
-    
+    print("\nScanning for crops...")
     for slide_folder in os.listdir(crops_folder):
         slide_path = os.path.join(crops_folder, slide_folder)
         if not os.path.isdir(slide_path):
             continue
-        
         crops_path = os.path.join(slide_path, 'crops')
         if not os.path.exists(crops_path):
             continue
-        
         try:
             files = os.listdir(crops_path)
             for f in files:
                 if f.endswith('.png') or f.endswith('.jpg'):
                     all_crops.append(os.path.join(crops_path, f))
-        except Exception as e:
-            print(f"  Error reading {crops_path}: {e}")
-    
-    print(f"Found {len(all_crops):,} total crops")
-    return all_crops
-
-
-def load_existing_labels(csv_path):
-    """Load any existing labels to avoid re-labeling."""
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        labeled = set(df['path'].tolist())
-        print(f"Loaded {len(labeled)} existing labels")
-        return df.to_dict('records'), labeled
-    return [], set()
-
-
-def save_labels(labels, csv_path):
-    """Save labels to CSV."""
-    df = pd.DataFrame(labels)
-    df.to_csv(csv_path, index=False)
-    print(f"Saved {len(labels)} labels to {csv_path}")
-
-
-def run_labeling(config):
-    """Main labeling loop."""
-    
-    # Get all crops
-    all_crops = get_all_crops(config['crops_folder'])
-    
-    if not all_crops:
-        print("No crops found!")
-        return
-    
-    # Load existing labels
-    labels, already_labeled = load_existing_labels(config['output_csv'])
-    
-    # Filter out already labeled
-    unlabeled = [c for c in all_crops if c not in already_labeled]
-    print(f"Unlabeled crops: {len(unlabeled):,}")
-    
-    if not unlabeled:
-        print("All crops have been labeled!")
-        return
-    
-    # Random sample
-    random.seed(config['random_seed'])
-    random.shuffle(unlabeled)
-    to_label = unlabeled[:config['num_to_label']]
-    
-    print(f"\nLabeling {len(to_label)} images...")
-    print("=" * 50)
-    print("Controls:")
-    print("  'b' = bacteria (keep)")
-    print("  'd' = debris/background (delete)")
-    print("  'u' = undo last")
-    print("  'q' = quit and save")
-    print("=" * 50)
-    
-    display_size = config['display_size']
-    session_labels = []
-    idx = 0
-    
-    cv2.namedWindow('Labeling', cv2.WINDOW_AUTOSIZE)
-    
-    while idx < len(to_label):
-        img_path = to_label[idx]
-        
-        # Load image
-        img = cv2.imread(img_path)
-        if img is None:
-            idx += 1
+        except:
+            pass
+    print(f"Found {len(all_crops):,} crops to filter")
+    if config['dry_run']:
+        print("\n  DRY RUN MODE - No files will be deleted")
+        print("    Set 'dry_run': False to actually delete debris")
+    threshold = config['bacteria_threshold']
+    bacteria_count = 0
+    debris_count = 0
+    debris_to_delete = []
+    batch_size = 64
+    image_size = config['image_size']
+    for i in tqdm(range(0, len(all_crops), batch_size), desc="Filtering"):
+        batch_paths = all_crops[i:i+batch_size]
+        images = []
+        valid_paths = []
+        for path in batch_paths:
+            img = cv2.imread(path)
+            if img is None:
+                continue
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, image_size)
+            img = img.astype(np.float32) / 255.0
+            img = torch.from_numpy(img).permute(2, 0, 1)
+            images.append(img)
+            valid_paths.append(path)
+        if not images:
             continue
-        
-        # Use original size, but ensure minimum display size for readability
-        img_h, img_w = img.shape[:2]
-        min_display = 200
-        
-        if img_h < min_display or img_w < min_display:
-            # Scale up small images for easier viewing (bicubic for smooth scaling)
-            scale = max(min_display / img_h, min_display / img_w)
-            new_w = int(img_w * scale)
-            new_h = int(img_h * scale)
-            img_display = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-        else:
-            # Show at original size
-            img_display = img.copy()
-        
-        # Add label count to image
-        bacteria_count = sum(1 for l in session_labels if l['label'] == 'bacteria')
-        debris_count = sum(1 for l in session_labels if l['label'] == 'debris')
-        
-        # Add text overlay
-        overlay = img_display.copy()
-        h, w = overlay.shape[:2]
-        cv2.putText(overlay, f"[{idx+1}/{len(to_label)}]", (5, 20), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        cv2.putText(overlay, f"B:{bacteria_count} D:{debris_count}", (5, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        cv2.putText(overlay, "b=bacteria d=debris u=undo q=quit", (5, h - 10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        
-        cv2.imshow('Labeling', overlay)
-        
-        # Wait for key
-        key = cv2.waitKey(0) & 0xFF
-        
-        if key == ord('b'):
-            # Bacteria
-            session_labels.append({
-                'path': img_path,
-                'label': 'bacteria',
-                'filename': os.path.basename(img_path)
-            })
-            idx += 1
-            
-        elif key == ord('d'):
-            # Debris
-            session_labels.append({
-                'path': img_path,
-                'label': 'debris',
-                'filename': os.path.basename(img_path)
-            })
-            idx += 1
-            
-        elif key == ord('u'):
-            # Undo
-            if session_labels:
-                removed = session_labels.pop()
-                idx -= 1
-                print(f"  Undid: {removed['label']}")
-            
-        elif key == ord('q'):
-            # Quit
-            print("\nQuitting...")
-            break
-    
-    cv2.destroyAllWindows()
-    
-    # Merge with existing labels and save
-    all_labels = labels + session_labels
-    save_labels(all_labels, config['output_csv'])
-    
-    # Summary
-    bacteria_count = sum(1 for l in all_labels if l['label'] == 'bacteria')
-    debris_count = sum(1 for l in all_labels if l['label'] == 'debris')
-    
-    print(f"\n" + "=" * 50)
-    print(f"SESSION COMPLETE")
-    print(f"=" * 50)
-    print(f"This session: {len(session_labels)} labeled")
-    print(f"Total labeled: {len(all_labels)}")
-    print(f"  Bacteria: {bacteria_count}")
-    print(f"  Debris: {debris_count}")
-    print(f"\nLabels saved to: {config['output_csv']}")
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-if __name__ == "__main__":
-    print("=" * 50)
-    print("BACTERIA vs DEBRIS LABELING TOOL")
-    print("=" * 50)
-    
-    run_labeling(CONFIG)
+        batch_tensor = torch.stack(images).to(device)
+        with torch.no_grad():
+            outputs = model(batch_tensor)
+            probs = torch.softmax(outputs, dim=1)
+            bacteria_probs = probs[:, 0].cpu().numpy()
+        for path, bacteria_prob in zip(valid_paths, bacteria_probs):
+            if bacteria_prob > threshold:
+                bacteria_count += 1
+            else:
+                debris_count += 1
+                debris_to_delete.append(path)
+    print(f"\nResults:")
+    print(f"  Bacteria (keep): {bacteria_count:,}")
+    print(f"  Debris (delete): {debris_count:,}")
+    print(f"  Debris %: {100*debris_count/(bacteria_count+debris_count):.1f}%")
+    if not config['dry_run'] and debris_to_delete:
+        print(f"\nDeleting {len(debris_to_delete):,} debris files...")
+        deleted = 0
+        for path in tqdm(debris_to_delete, desc="Deleting"):
+            try:
+                os.remove(path)
+                deleted += 1
+            except Exception as e:
+                pass
+        print(f"Deleted {deleted:,} files")
+    return bacteria_count, debris_count
