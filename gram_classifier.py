@@ -1,13 +1,3 @@
-"""
-Gram Classification - Vision Transformer (ViT)
-
-Binary classification: Gram-positive vs Gram-negative
-Uses pretrained ViT-Small from timm with transfer learning.
-Supports slide-level train/val split with selectable validation slides.
-
-Expected accuracy: 93-97%
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -25,7 +15,6 @@ from tqdm import tqdm
 from collections import Counter
 import json
 
-# Install timm if needed
 try:
     import timm
 except ImportError:
@@ -39,58 +28,42 @@ print(f"Using device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-
-# ============================================================================
-# CONFIG
-# ============================================================================
-
 CONFIG = {
-    # Paths
+
     'labels_excel': r'C:\Users\carol\gram stain ai\species_training.xlsx',
     'crops_folder': r'C:\Gram Stain Training Data\detections',
     'model_dir': r'C:\Gram Stain Training Data\models',
     
-    # Species filter - set to None to use all species, or list specific ones
-    # Example: ['Staphylococcus aureus', 'Escherichia coli', 'Klebsiella pneumoniae']
     'species_filter': None,
     
-    # Validation slides - one per species for good coverage
-    # Set to None for automatic 1-slide-per-species selection
     'val_slides': [
-        'SA1',   # Staphylococcus aureus (positive)
-        'SE2',   # Staphylococcus epidermidis (positive)
-        'EFS10',  # Enterococcus faecalis (positive)
-        'EF8',   # Enterococcus faecium (positive)
-        'SPY2',  # Streptococcus pyogenes (positive)
-        'SPN6',  # Streptococcus pneumoniae (positive)
-        'VS3',   # Streptococcus mitis (positive)
-        'CB13',   # Corynebacterium striatum (positive)
-        'LS9',   # Listeria monocytogenes (positive)
-        'KP2',   # Klebsiella pneumoniae (negative)
-        'ECL7',  # Enterobacter cloacae (negative)
-        'PA3',   # Pseudomonas aeruginosa (negative)
-        'AB2',   # Acinetobacter baumannii (negative)
-        'MC1',   # Moraxella catarrhalis (negative)
-        'HI5',   # Haemophilus influenzae (negative)
+        'SA1',
+        'SE2',
+        'EFS10',
+        'EF8',
+        'SPY2',
+        'SPN6',
+        'VS3',
+        'CB13',
+        'LS9',
+        'KP2',
+        'ECL7',
+        'PA3',
+        'AB2',
+        'MC1',
+        'HI5',
     ],
     
-    # Training settings
-    'image_size': (224, 224),  # ViT default
+    'image_size': (224, 224),
     'batch_size': 32,
-    'epochs_frozen': 5,        # Phase 1: train classifier only
-    'epochs_unfrozen': 15,     # Phase 2: fine-tune
+    'epochs_frozen': 5,
+    'epochs_unfrozen': 15,
     'lr_frozen': 1e-3,
     'lr_unfrozen': 1e-5,
     'patience': 10,
 }
 
-
-# ============================================================================
-# DATASET
-# ============================================================================
-
 class GramDataset(Dataset):
-    """Dataset for Gram classification."""
     
     def __init__(self, image_paths, labels, label_map, image_size=(224, 224), augment=True):
         self.image_paths = image_paths
@@ -99,7 +72,6 @@ class GramDataset(Dataset):
         self.image_size = image_size
         self.augment = augment
         
-        # ImageNet normalization
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
@@ -143,28 +115,19 @@ class GramDataset(Dataset):
         
         return img, label
 
-
-# ============================================================================
-# MODEL
-# ============================================================================
-
 class GramViT(nn.Module):
-    """Vision Transformer for Gram classification."""
     
     def __init__(self, num_classes=2, pretrained=True):
         super().__init__()
         
-        # Load pretrained ViT-Small (patch size 16, image size 224)
         self.vit = timm.create_model(
             'vit_small_patch16_224',
             pretrained=pretrained,
-            num_classes=0  # Remove classifier head
+            num_classes=0
         )
         
-        # Get feature dimension
-        self.num_features = self.vit.embed_dim  # 384 for ViT-Small
+        self.num_features = self.vit.embed_dim
         
-        # Custom classifier head
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.num_features),
             nn.Dropout(0.3),
@@ -175,17 +138,15 @@ class GramViT(nn.Module):
         )
     
     def forward(self, x):
-        # Get features from ViT (CLS token)
+
         features = self.vit(x)
-        # Classify
+
         return self.classifier(features)
     
     def get_features(self, x):
-        """Extract features before classifier."""
         return self.vit(x)
     
     def freeze_backbone(self):
-        """Freeze ViT, train only classifier."""
         for param in self.vit.parameters():
             param.requires_grad = False
         for param in self.classifier.parameters():
@@ -193,23 +154,19 @@ class GramViT(nn.Module):
         print("ViT backbone frozen. Training only classifier.")
     
     def unfreeze_all(self):
-        """Unfreeze all layers."""
         for param in self.parameters():
             param.requires_grad = True
         print("All layers unfrozen for fine-tuning.")
     
     def unfreeze_last_n_blocks(self, n=4):
-        """Unfreeze last N transformer blocks."""
-        # Freeze all first
+
         for param in self.vit.parameters():
             param.requires_grad = False
         
-        # Unfreeze last N blocks
         for block in self.vit.blocks[-n:]:
             for param in block.parameters():
                 param.requires_grad = True
         
-        # Unfreeze norm and classifier
         for param in self.vit.norm.parameters():
             param.requires_grad = True
         for param in self.classifier.parameters():
@@ -217,25 +174,17 @@ class GramViT(nn.Module):
         
         print(f"Unfroze last {n} transformer blocks + classifier.")
 
-
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
 def load_data(config):
-    """Load data with slide-level split and optional species filter."""
     
     df = pd.read_excel(config['labels_excel'])
     print(f"Loaded lookup table with {len(df)} entries")
     
-    # Get species filter
     species_filter = config.get('species_filter', None)
     if species_filter:
         print(f"\nFiltering for {len(species_filter)} species:")
         for sp in species_filter:
             print(f"  - {sp}")
     
-    # Create lookup: slide_name -> gram label (with species filter)
     lookup = {}
     slide_to_species = {}
     for _, row in df.iterrows():
@@ -243,7 +192,6 @@ def load_data(config):
         gram = row['Gram'].strip().lower()
         species = row['Species'].strip()
         
-        # Skip if species filter is set and this species is not in it
         if species_filter and species not in species_filter:
             continue
         
@@ -252,7 +200,6 @@ def load_data(config):
     
     print(f"Slides in lookup (after filter): {len(lookup)}")
     
-    # Find all crops organized by slide
     crops_folder = config['crops_folder']
     slides_data = {}
     
@@ -292,11 +239,10 @@ def load_data(config):
     if len(slides_data) == 0:
         raise ValueError("No slides found!")
     
-    # Split by specified validation slides or auto-select
     config_val_slides = config.get('val_slides', None)
     
     if config_val_slides:
-        # Use specified validation slides
+
         val_slides = [s for s in config_val_slides if s in slides_data]
         train_slides = [s for s in slides_data.keys() if s not in val_slides]
         
@@ -309,7 +255,7 @@ def load_data(config):
             missing = set(config_val_slides) - set(val_slides)
             print(f"  WARNING: Missing slides: {missing}")
     else:
-        # Auto-select: 1 slide per species
+
         species_slides = {}
         for _, row in df.iterrows():
             name = str(row['Name']).strip()
@@ -334,7 +280,6 @@ def load_data(config):
                 train_slides.extend(slides)
                 print(f"  {species}: train only (1 slide)")
     
-    # Build image lists
     train_paths = []
     train_labels = []
     val_paths = []
@@ -353,11 +298,9 @@ def load_data(config):
     print(f"\nTotal training images: {len(train_paths)}")
     print(f"Total validation images: {len(val_paths)}")
     
-    # Label map
     label_map = {'positive': 0, 'negative': 1}
     reverse_map = {0: 'positive', 1: 'negative'}
     
-    # Class distribution
     train_counts = Counter(train_labels)
     val_counts = Counter(val_labels)
     print(f"\nTraining: {train_counts['positive']} positive, {train_counts['negative']} negative")
@@ -375,13 +318,7 @@ def load_data(config):
         'val_slides': val_slides
     }
 
-
-# ============================================================================
-# TRAINER
-# ============================================================================
-
 class GramViTTrainer:
-    """Training pipeline for ViT Gram classifier."""
     
     def __init__(self, config):
         self.config = config
@@ -393,7 +330,6 @@ class GramViTTrainer:
         self.label_map = self.data['label_map']
         self.reverse_map = self.data['reverse_map']
         
-        # Save config
         mapping_path = os.path.join(config['model_dir'], 'gram_vit_config.json')
         with open(mapping_path, 'w') as f:
             json.dump({
@@ -404,7 +340,6 @@ class GramViTTrainer:
         print(f"Saved config to {mapping_path}")
     
     def train(self):
-        """Train with two-phase transfer learning."""
         
         train_paths = self.data['train_paths']
         val_paths = self.data['val_paths']
@@ -414,7 +349,6 @@ class GramViTTrainer:
         print(f"\nTraining samples: {len(train_paths)} ({len(self.data['train_slides'])} slides)")
         print(f"Validation samples: {len(val_paths)} ({len(self.data['val_slides'])} slides)")
         
-        # Datasets
         train_dataset = GramDataset(
             train_paths, train_labels, self.label_map,
             self.config['image_size'], augment=True
@@ -429,10 +363,8 @@ class GramViTTrainer:
         val_loader = DataLoader(val_dataset, batch_size=self.config['batch_size'],
                                 shuffle=False, num_workers=0, pin_memory=True)
         
-        # Model
         model = GramViT(num_classes=2, pretrained=True).to(device)
         
-        # Class weights
         train_counts = Counter(train_labels)
         total = len(train_labels)
         weights = torch.tensor([
@@ -445,9 +377,6 @@ class GramViTTrainer:
         best_acc = 0
         best_model_path = None
         
-        # =====================================================================
-        # PHASE 1: Frozen backbone
-        # =====================================================================
         print(f"\n--- Phase 1: Training classifier (frozen ViT) ---")
         model.freeze_backbone()
         
@@ -476,11 +405,8 @@ class GramViTTrainer:
                     f'gram_vit_best_{timestamp}.pth'
                 )
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
         
-        # =====================================================================
-        # PHASE 2: Fine-tune
-        # =====================================================================
         print(f"\n--- Phase 2: Fine-tuning ViT ---")
         model.unfreeze_last_n_blocks(n=4)
         
@@ -513,7 +439,7 @@ class GramViTTrainer:
                     f'gram_vit_best_{timestamp}.pth'
                 )
                 self._save_model(model, best_model_path, val_acc)
-                print(f"  ★ Saved best model ({val_acc:.1f}%)")
+                print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
             else:
                 patience_counter += 1
                 if patience_counter >= self.config['patience']:
@@ -523,14 +449,11 @@ class GramViTTrainer:
         print(f"\nTraining complete! Best accuracy: {best_acc:.1f}%")
         print(f"Model saved to: {best_model_path}")
         
-        # Load best model for final evaluation
         checkpoint = torch.load(best_model_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Final evaluation
         self._final_evaluation(model, val_loader)
         
-        # Save plots
         self.plot_history()
         
         return self.history
@@ -591,7 +514,6 @@ class GramViTTrainer:
         }, path)
     
     def _final_evaluation(self, model, loader):
-        """Print classification report and confusion matrix."""
         model.eval()
         all_preds = []
         all_labels = []
@@ -609,7 +531,6 @@ class GramViTTrainer:
         print("\nClassification Report:")
         print(classification_report(all_labels, all_preds, target_names=target_names))
         
-        # Confusion matrix - percentages
         cm = confusion_matrix(all_labels, all_preds)
         cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
         
@@ -627,7 +548,6 @@ class GramViTTrainer:
         plt.close()
     
     def plot_history(self):
-        """Plot and save training history."""
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         
         axes[0].plot(self.history['train_loss'], label='Train')
@@ -651,13 +571,7 @@ class GramViTTrainer:
         print(f"Saved training history to {save_path}")
         plt.close()
 
-
-# ============================================================================
-# PREDICTOR
-# ============================================================================
-
 class GramViTClassifier:
-    """Use trained ViT for Gram classification."""
     
     def __init__(self, model_path, image_size=(224, 224)):
         self.image_size = image_size
@@ -682,7 +596,6 @@ class GramViTClassifier:
         print(f"Accuracy: {checkpoint['val_acc']:.1f}%")
     
     def predict(self, image_path):
-        """Predict Gram classification for a single image."""
         img = cv2.imread(image_path)
         if img is None:
             return None, 0.0
@@ -698,7 +611,6 @@ class GramViTClassifier:
         return self.reverse_map[pred_class], confidence
     
     def predict_batch(self, image_paths, batch_size=32):
-        """Predict Gram for multiple images."""
         results = []
         
         for i in tqdm(range(0, len(image_paths), batch_size), desc="Predicting"):
