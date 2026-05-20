@@ -1,14 +1,3 @@
-"""
-Debris Filter
-
-1. Trains a binary classifier (bacteria vs debris) on your labeled data
-2. Runs predictions on ALL crops
-3. Deletes debris, keeps bacteria
-
-Usage:
-    python debris_filter.py
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -24,39 +13,26 @@ from tqdm import tqdm
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-
-# ============================================================================
-# CONFIG
-# ============================================================================
-
 CONFIG = {
-    # Input
+
     'labels_csv': r'C:\Gram Stain Training Data\debris_labels.csv',
     'crops_folder': r'C:\Gram Stain Training Data\detections',
     
-    # Model output
     'model_dir': r'C:\Gram Stain Training Data\models',
     
-    # Training
     'image_size': (64, 64),
     'batch_size': 64,
     'epochs': 30,
     'learning_rate': 1e-3,
     
-    # Filtering
-    'bacteria_threshold': 0.7,  # Keep if bacteria confidence > this
-    'dry_run': False,  # Set to False to actually delete files
+    'bacteria_threshold': 0.7,
+    'dry_run': False,
 }
-
-
-# ============================================================================
-# DATASET
-# ============================================================================
 
 class DebrisDataset(Dataset):
     def __init__(self, image_paths, labels, image_size=(64, 64), augment=True):
         self.image_paths = image_paths
-        self.labels = labels  # 0 = bacteria, 1 = debris
+        self.labels = labels
         self.image_size = image_size
         self.augment = augment
     
@@ -87,11 +63,6 @@ class DebrisDataset(Dataset):
         label = torch.tensor(self.labels[idx], dtype=torch.long)
         
         return img, label
-
-
-# ============================================================================
-# MODEL
-# ============================================================================
 
 class DebrisCNN(nn.Module):
     def __init__(self):
@@ -136,48 +107,36 @@ class DebrisCNN(nn.Module):
         x = self.classifier(x)
         return x
 
-
-# ============================================================================
-# TRAINING
-# ============================================================================
-
 def train_debris_filter(config):
-    """Train the debris filter model."""
     
     print("=" * 60)
     print("TRAINING DEBRIS FILTER")
     print("=" * 60)
     
-    # Load labels
     df = pd.read_csv(config['labels_csv'])
     print(f"Loaded {len(df)} labeled samples")
     print(f"  Bacteria: {(df['label'] == 'bacteria').sum()}")
     print(f"  Debris: {(df['label'] == 'debris').sum()}")
     
-    # Prepare data
     image_paths = df['path'].tolist()
     labels = [0 if l == 'bacteria' else 1 for l in df['label']]
     
-    # Split
     train_paths, val_paths, train_labels, val_labels = train_test_split(
         image_paths, labels, test_size=0.2, stratify=labels, random_state=42
     )
     
     print(f"\nTrain: {len(train_paths)}, Val: {len(val_paths)}")
     
-    # Datasets
     train_dataset = DebrisDataset(train_paths, train_labels, config['image_size'], augment=True)
     val_dataset = DebrisDataset(val_paths, val_labels, config['image_size'], augment=False)
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=0)
     
-    # Model
     model = DebrisCNN().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
-    # Train
     best_acc = 0
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
@@ -203,7 +162,6 @@ def train_debris_filter(config):
         
         train_acc = 100. * train_correct / train_total
         
-        # Validate
         model.eval()
         val_correct = 0
         val_total = 0
@@ -227,24 +185,17 @@ def train_debris_filter(config):
                 'model_state_dict': model.state_dict(),
                 'val_acc': val_acc
             }, model_path)
-            print(f"  ★ Saved best model ({val_acc:.1f}%)")
+            print(f"  \u2605 Saved best model ({val_acc:.1f}%)")
     
     print(f"\nTraining complete! Best accuracy: {best_acc:.1f}%")
     return model_path
 
-
-# ============================================================================
-# FILTERING
-# ============================================================================
-
 def filter_debris(config, model_path):
-    """Run debris filter on all crops and delete debris."""
     
     print("\n" + "=" * 60)
     print("FILTERING DEBRIS")
     print("=" * 60)
     
-    # Load model
     model = DebrisCNN().to(device)
     checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -252,7 +203,6 @@ def filter_debris(config, model_path):
     print(f"Loaded model: {model_path}")
     print(f"Model accuracy: {checkpoint['val_acc']:.1f}%")
     
-    # Get all crops
     crops_folder = config['crops_folder']
     all_crops = []
     
@@ -277,10 +227,9 @@ def filter_debris(config, model_path):
     print(f"Found {len(all_crops):,} crops to filter")
     
     if config['dry_run']:
-        print("\n⚠️  DRY RUN MODE - No files will be deleted")
+        print("\n\u26a0\ufe0f  DRY RUN MODE - No files will be deleted")
         print("    Set 'dry_run': False to actually delete debris")
     
-    # Process in batches
     threshold = config['bacteria_threshold']
     bacteria_count = 0
     debris_count = 0
@@ -292,7 +241,6 @@ def filter_debris(config, model_path):
     for i in tqdm(range(0, len(all_crops), batch_size), desc="Filtering"):
         batch_paths = all_crops[i:i+batch_size]
         
-        # Load batch
         images = []
         valid_paths = []
         
@@ -310,15 +258,13 @@ def filter_debris(config, model_path):
         if not images:
             continue
         
-        # Predict
         batch_tensor = torch.stack(images).to(device)
         
         with torch.no_grad():
             outputs = model(batch_tensor)
             probs = torch.softmax(outputs, dim=1)
-            bacteria_probs = probs[:, 0].cpu().numpy()  # bacteria = class 0
+            bacteria_probs = probs[:, 0].cpu().numpy()
         
-        # Classify - keep if bacteria confidence > threshold
         for path, bacteria_prob in zip(valid_paths, bacteria_probs):
             if bacteria_prob > threshold:
                 bacteria_count += 1
@@ -331,7 +277,6 @@ def filter_debris(config, model_path):
     print(f"  Debris (delete): {debris_count:,}")
     print(f"  Debris %: {100*debris_count/(bacteria_count+debris_count):.1f}%")
     
-    # Delete debris
     if not config['dry_run'] and debris_to_delete:
         print(f"\nDeleting {len(debris_to_delete):,} debris files...")
         
@@ -346,30 +291,3 @@ def filter_debris(config, model_path):
         print(f"Deleted {deleted:,} files")
     
     return bacteria_count, debris_count
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("DEBRIS FILTER")
-    print("=" * 60)
-    
-    # Check if labels exist
-    if not os.path.exists(CONFIG['labels_csv']):
-        print(f"Labels not found: {CONFIG['labels_csv']}")
-        print("Run label_debris.py first!")
-        exit()
-    
-    # Train
-    model_path = train_debris_filter(CONFIG)
-    
-    # Filter
-    filter_debris(CONFIG, model_path)
-    
-    print("\n" + "=" * 60)
-    print("DONE!")
-    print("=" * 60)
-    print("\nIf results look good, set 'dry_run': False and run again to delete debris.")
