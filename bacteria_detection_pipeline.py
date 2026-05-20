@@ -805,10 +805,4 @@ def run_all_slides(config):
     print(f"Total crops saved: {total_crops}")
     print(f"Storage remaining: {check_storage_gb():.1f} GB")
 
-
-if __name__ == "__main__":
-    print("="*60)
-    print("BACTERIA DETECTION PIPELINE")
-    print("="*60)
-
     run_all_slides(CONFIG)
